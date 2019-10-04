@@ -4,6 +4,7 @@ import random
 import threading
 import gym
 from time import sleep
+from sys import argv
 
 """
 今回のA3Cの実装
@@ -45,17 +46,18 @@ main: mainroutin
 #define constants
 WORKER_NUM=5
 ENV_NAME="CartPole-v0"
-ADVANTAGE=3
+ADVANTAGE=2
 STATE_NUM=4
 ACTION_LIST=[0,1]
 ACTION_NUM=2
-GREEDY_EPS=0.01
-GAMMA=0.99
-LEARNING_RATE=0.01
+GREEDY_EPS=0.05
+GAMMA=0.98
+LEARNING_RATE=0.002
 RMS_DECAY=0.99
 LOSS_V=0.5
-LOSS_ENTROPY=0.01
+LOSS_ENTROPY=0.02
 HIDDEN_LAYERE=20
+OUTPUT_FILEPATH="trained_model/a3c_model.info"
 
 
 class brain:
@@ -127,7 +129,7 @@ class brain:
         _s=np.array([memory[j][4] for j in range(length)]).reshape(-1,4)
         _, v=self.predict(_s)
         self.R=(np.where(self.d_,0,1)*v.reshape(-1,1))*s_mask+self.R_
-        # print(self.R_)
+        # print([memory[j][2] for j in range(length)])
 
 
 class Parameter_server:
@@ -172,7 +174,7 @@ class agent:
             R = ((R-memory[i-1][2])/GAMMA) + memory[i+ADVANTAGE][2]*(GAMMA**(ADVANTAGE-1))
             self.memory.append([memory[i][0],memory[i][1],R,memory[i+ADVANTAGE][3],memory[i][4],GAMMA**ADVANTAGE])
             
-        for i in range(ADVANTAGE):
+        for i in range(ADVANTAGE-1):
             R=((R-memory[len(memory)-ADVANTAGE+i][2])/GAMMA)
             self.memory.append([memory[i][0],memory[i][1],R,True,memory[i][4],GAMMA**(ADVANTAGE-i)])
         self.brain.make_train_table(self.memory)
@@ -204,10 +206,12 @@ class Worker:
                 self.env_run()
             elif self.thread_type=="train" and isLearned:
                 sleep(3)
+                break
             elif self.thread_type=="test" and not isLearned:
                 sleep(3)
             elif self.thread_type=="test" and isLearned:
                 self.env_run()
+                break
 
     def env_run(self):
         self.total_trial+=1
@@ -228,7 +232,7 @@ class Worker:
             elif self.thread_type=="test":
                 self.env.render()
                 action=self.agent.action(observation)
-                sleep(0.1)
+                sleep(0.03)
             
             next_observation,_,done,_=self.env.step(action)
 
@@ -261,7 +265,7 @@ class Worker:
             self.memory=[]
 
 
-def main():
+def main(save,load):
     #make thread
     with tf.device("/cpu:0"):
         parameter_server=Parameter_server()
@@ -269,20 +273,37 @@ def main():
         for i in range(WORKER_NUM):
             thread_name="local_thread"+str(i)
             thread.append(Worker(thread_type="train",thread_name=thread_name,parameter_server=parameter_server))
-        thread.append(Worker(thread_type="test",thread_name="test_thread",parameter_server=parameter_server))
     
     COORD=tf.train.Coordinator()
     SESS.run(tf.global_variables_initializer())
-
+    saver=tf.train.Saver()
+    if load:
+        saver.restore(SESS,OUTPUT_FILEPATH)
+    runnning_thread=[]
     for worker in thread:
         job=lambda: worker.run_thread()
         t=threading.Thread(target=job)
         t.start()
+        runnning_thread.append(t)
+    COORD.join(runnning_thread)
+    test=Worker(thread_type="test",thread_name="test_thread",parameter_server=parameter_server)
+    test.run_thread()
+    if save:
+        saver.restore(SESS,OUTPUT_FILEPATH)
 
 if __name__=="__main__":
     SESS=tf.Session()
+    if "save" in argv:
+        save=True
+    else:
+        save=False
+    if "load" in argv:
+        load=True
+    else:
+        load=False
     frame=0
     isLearned=False
-    main()
+    
+    main(save,load)
 
 print("end")
