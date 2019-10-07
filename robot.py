@@ -5,6 +5,7 @@ import tensorflow as tf
 import numpy as np
 import threading
 from time import sleep
+from gym import wrappers
 # 基本的な環境の使用方法
 # env = gym.make('RoboschoolAnt-v1')
 # env.reset()
@@ -48,20 +49,23 @@ args=parser.parse_args()
 
 sample_env=gym.make(args.env_name)
 
-WORKER_NUM=1
-ADVANTAGE=2
+#video
+video_path="./video"
+
+WORKER_NUM=8
+ADVANTAGE=10
 ENV_NAME=args.env_name
 STATE_NUM=28
 ACTION_NUM=len(sample_env.action_space.high)
 ACTION_SPACE=[(x,y) for x,y in zip(sample_env.action_space.low,sample_env.action_space.high)]
 #[(-1,1),(-1,1),(-1,1),(-1,1)]
-GREEDY_EPS=0.05
+GREEDY_EPS=0.1
 GAMMA=0.99
 LEARNING_RATE=0.001
 RMS_DECAY=0.99
 LOSS_V=0.5
 LOSS_ENTROPY=0.02
-HIDDEN_LAYERE1=20
+HIDDEN_LAYERE1=100
 OUTPUT_FILEPATH=args.model_path
 
 def random(min,max,size):
@@ -89,7 +93,7 @@ class brain:
         advantage=self.reward-self.v
         self.sig=1/(1+tf.exp(-self.theta))
         self.prob=tf.exp(-tf.square(self.action-self.mu)/(2*tf.square(self.sig)))/self.sig
-        self.log_prob=tf.log(self.prob)
+        self.log_prob=tf.log(self.prob+1e-10)
         self.policy_loss=-tf.reduce_sum(tf.stop_gradient(advantage)*self.log_prob,axis=1,keepdims=True)
 
         self.value_loss=tf.square(advantage)
@@ -120,6 +124,7 @@ class brain:
         feed_dict={self.input:self.s_, self.action:self.a_, self.reward:self.R}
         # print("::::::::",feed_dict,"::::::::")
         SESS.run(self.update_parameter_server,feed_dict)
+        return SESS.run(self.loss,feed_dict)
 
     def pull_parameter(self):
         SESS.run(self.pull_parameter_server)
@@ -132,7 +137,7 @@ class brain:
         length=len(memory)
        
         self.s_=np.array([memory[j][0] for j in range(length)]).reshape(-1,STATE_NUM)
-        self.a_=np.eye(ACTION_NUM)[[memory[j][1] for j in range(length)]].reshape(-1,ACTION_NUM)
+        self.a_=np.vstack((memory[j][1] for j in range(length))).reshape(-1,ACTION_NUM)
         self.R_=np.array([memory[j][2] for j in range(length)]).reshape(-1,1)
        
         self.d_=np.array([memory[j][3] for j in range(length)]).reshape(-1,1)
@@ -166,7 +171,11 @@ class agent:
         mu,sig,v = self.brain.predict(state)
         count=0
         while True:
-            action=np.random.multivariate_normal(mu,sig*np.eye(ACTION_NUM))
+            try:
+                action=np.random.multivariate_normal(mu,sig*np.eye(ACTION_NUM))
+            except:
+                print(mu,sig)
+                action=random(-1,1,size=ACTION_NUM)
             if sum(action>=-1)==ACTION_NUM and sum(action<=1)==ACTION_NUM:
                 break
             count+=1
@@ -207,7 +216,7 @@ class agent:
         self.brain.push_parameter()
     
     def train(self):
-        self.brain.update_parameter()
+        return self.brain.update_parameter()
 
 
 class Worker:
@@ -217,6 +226,9 @@ class Worker:
         self.agent=agent(thread_name,parameter_server)
         self.parameter_server=parameter_server
         self.env=gym.make(ENV_NAME)
+        if self.thread_type=="test":
+            self.env=wrappers.Monitor(self.env, video_path, force=True)
+        self.loss_memory=np.zeros(10)
         self.leaning_memory=np.zeros(10)
         self.memory=[]
         self.total_trial=0
@@ -266,14 +278,13 @@ class Worker:
 
             if step%100==0:
                 self.agent.push_advantage_reward(self.memory)
-                self.agent.train()
+                self.loss_memory=np.hstack((self.loss_memory[1:],self.agent.train()))
                 self.memory=[]
+                print("Thread:",self.name," Thread_trials:",self.total_trial," score:",step,"-",distance," loss:",self.loss_memory.mean()," total_step:",frame)
             if step==1000:
                 break
-
-        self.leaning_memory=np.hstack((self.leaning_memory[1:],step))
-        print("Thread:",self.name," Thread_trials:",self.total_trial," score:",step," mean_score:",self.leaning_memory.mean()," total_step:",frame)
-        
+            
+        self.leaning_memory=np.hstack((self.leaning_memory[1:],step)) 
         #when finish learning
         if self.total_trial>=100:
             isLearned=True
@@ -320,7 +331,6 @@ if __name__=="__main__":
 
     frame=0
     isLearned=False
-    
     main(args)
 
 print("end")

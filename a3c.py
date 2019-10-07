@@ -5,6 +5,7 @@ import random
 import threading
 import gym
 from time import sleep
+from gym import wrappers
 
 """
 今回のA3Cの実装
@@ -44,6 +45,13 @@ worker:
 main: mainroutin
 """
 
+def huber_loss(advantage, delta=0.5):
+    error = advantage
+    cond = tf.abs(error) < delta
+
+    squared_loss = 0.5 * tf.square(error)
+    linear_loss = delta * (tf.abs(error) - 0.5 * delta)
+    return tf.where(cond, squared_loss, linear_loss)
 
 class brain:
     def __init__(self,name,parameter_server):
@@ -181,6 +189,8 @@ class Worker:
         self.agent=agent(thread_name,parameter_server)
         self.parameter_server=parameter_server
         self.env=gym.make(ENV_NAME)
+        if self.thread_type=="test":
+            self.env=wrappers.Monitor(self.env, video_path, force=True)
         self.leaning_memory=np.zeros(10)
         self.memory=[]
         self.total_trial=0
@@ -218,7 +228,6 @@ class Worker:
             elif self.thread_type=="test":
                 self.env.render()
                 action=self.agent.action(observation)
-                sleep(0.02)
             
             next_observation,_,done,_=self.env.step(action)
 
@@ -264,6 +273,7 @@ def main(args):
     COORD=tf.train.Coordinator()
     SESS.run(tf.global_variables_initializer())
     saver=tf.train.Saver()
+    
     if args.load:
         ckpt = tf.train.get_checkpoint_state('./trained_model')
         if ckpt:
@@ -287,11 +297,13 @@ if __name__=="__main__":
     parser.add_argument("--env_name",default="CartPole-v0",help="environment name. default is CartPole-v0")
     parser.add_argument("--save",action="store_true",default=False,help="save command")
     parser.add_argument("--load",action="store_true",default=False,help="load command")
+    parser.add_argument("--thread_num",type=int,default=5)
     args=parser.parse_args()
 
     #define constatns
 
-    WORKER_NUM=5
+    video_path="./video"
+    WORKER_NUM=args.thread_num
     ADVANTAGE=2
     ENV_NAME=args.env_name
     STATE_NUM=4
@@ -303,7 +315,7 @@ if __name__=="__main__":
     RMS_DECAY=0.99
     LOSS_V=0.5
     LOSS_ENTROPY=0.02
-    HIDDEN_LAYERE=20
+    HIDDEN_LAYERE=30
     OUTPUT_FILEPATH=args.model_path
 
 
