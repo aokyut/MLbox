@@ -1,48 +1,71 @@
-import argparse
+import roboschool
+import gym
+from argparse import ArgumentParser
 import tensorflow as tf
 import numpy as np
-import random
 import threading
-import gym
 from time import sleep
+# 基本的な環境の使用方法
+# env = gym.make('RoboschoolAnt-v1')
+# env.reset()
+# print(env.observation_space)
+# print(env.action_space)
+# print(env.observation_space.high)
+# print(env.observation_space.low)
+# print(env.action_space.high)
+# print(env.action_space.low)
+# while True:
+#     ob,r,_,done=env.step(env.action_space.sample())
+#     print(r)
+    # env.render()
+
 
 """
-今回のA3Cの実装
-
-brain
-/self.name
-/self.model
-/self.graph
-/self.parameter_server
-/self.build_model()
-/self.update_parameter()
-/self.pull_parameter()
-/self.push_parameter()
-
-parameter_server
-/self.model
-/self.build_model()
-
-agent
-/self.name
-/self.brain
-/self.parameter_server
-/self.action()
-/self.greedy_action()
-/self.push_advantage_reward()
-/self.finish_leaning()
-
-worker:  
-/self.thread_type
-/self.agent
-/self.env
-/self.parameter_server
-/self.name
-/self.run_thread()
-/self.env_run()
-
-main: mainroutin
+今回の実装：連続行動空間において行動決定を行うモデルの作成
+今回用いるモデル：'RoboschoolAnt-v1'
+a3c.pyを改良して行う
+変更点
+・入力部分の変更(入力：２８次元、出力：８次元)
+・ネットワークの出力部分を行動確率分布の平均と偏差を出力するように変更
+・行動選択部分の変更
+ネットワークの出力：行動確率（平均（８次元）mu、分散（一次元））sig、状態価値（一次元）v
+ネットワークの損失関数部分
+agentのaction部分
+Workerの報酬評価部分
+環境から与えられるrewardは重心の進み具合と思われる
+これの差を報酬として与えることにする
+さらに一エピソードを１０００ステップと設定しておく→1000ステップたつと強制的に終了
+そして１００ステップごとに学習を行うことにする
 """
+parser=ArgumentParser(description="Reiforcement training with A3C",add_help=True)
+parser.add_argument("--model_path",type=str,required=True,help="model path. required")
+parser.add_argument("--env_name",default="RoboschoolAnt-v1",help="environment name. default is CartPole-v0")
+parser.add_argument("--save",action="store_true",default=False,help="save command")
+parser.add_argument("--load",action="store_true",default=False,help="load command")
+args=parser.parse_args()
+
+#define constatns
+
+sample_env=gym.make(args.env_name)
+
+WORKER_NUM=1
+ADVANTAGE=2
+ENV_NAME=args.env_name
+STATE_NUM=28
+ACTION_NUM=len(sample_env.action_space.high)
+ACTION_SPACE=[(x,y) for x,y in zip(sample_env.action_space.low,sample_env.action_space.high)]
+#[(-1,1),(-1,1),(-1,1),(-1,1)]
+GREEDY_EPS=0.05
+GAMMA=0.99
+LEARNING_RATE=0.001
+RMS_DECAY=0.99
+LOSS_V=0.5
+LOSS_ENTROPY=0.02
+HIDDEN_LAYERE1=20
+OUTPUT_FILEPATH=args.model_path
+
+def random(min,max,size):
+    return np.random.uniform(size=size)*(max-min)+min
 
 
 class brain:
@@ -54,8 +77,9 @@ class brain:
     def build_model(self):
         with tf.variable_scope(self.name):
             self.input=tf.placeholder(dtype=tf.float32,shape=[None,STATE_NUM])
-            hidden1=tf.layers.dense(self.input,HIDDEN_LAYERE,activation=tf.nn.leaky_relu)
-            self.prob=tf.layers.dense(hidden1,ACTION_NUM,activation=tf.nn.softmax)
+            hidden1=tf.layers.dense(self.input,HIDDEN_LAYERE1,activation=tf.nn.leaky_relu)
+            self.mu=tf.layers.dense(hidden1,ACTION_NUM)
+            self.theta=tf.layers.dense(hidden1,1)
             self.v=tf.layers.dense(hidden1,1)
 
         self.reward=tf.placeholder(dtype=tf.float32,shape=(None,1))
@@ -63,8 +87,10 @@ class brain:
 
 
         advantage=self.reward-self.v
-        self.prob_loss=tf.reduce_sum(tf.log(self.prob*self.action+1e-10),axis=1,keepdims=True)
-        self.policy_loss=-self.prob_loss*tf.stop_gradient(advantage)
+        self.sig=1/(1+tf.exp(-self.theta))
+        self.prob=tf.exp(-tf.square(self.action-self.mu)/(2*tf.square(self.sig)))/self.sig
+        self.log_prob=tf.log(self.prob)
+        self.policy_loss=-tf.reduce_sum(tf.stop_gradient(advantage)*self.log_prob,axis=1,keepdims=True)
 
         self.value_loss=tf.square(advantage)
 
@@ -87,8 +113,8 @@ class brain:
     def predict(self,state):
         state=np.array(state).reshape(-1,STATE_NUM)
         feed_dict={self.input:state}
-        p,v=SESS.run([self.prob,self.v],feed_dict)
-        return p.reshape(-1),v.reshape(-1)
+        mu,sig,v=SESS.run([self.mu,self.sig,self.v],feed_dict)
+        return mu.reshape(-1),sig.reshape(-1),v.reshape(-1)
 
     def update_parameter(self):
         feed_dict={self.input:self.s_, self.action:self.a_, self.reward:self.R}
@@ -112,7 +138,7 @@ class brain:
         self.d_=np.array([memory[j][3] for j in range(length)]).reshape(-1,1)
         s_mask=np.array([memory[j][5] for j in range(length)]).reshape(-1,1)
         _s=np.array([memory[j][4] for j in range(length)]).reshape(-1,STATE_NUM)
-        _, v=self.predict(_s)
+        _,_, v=self.predict(_s)
         self.R=(np.where(self.d_,0,1)*v.reshape(-1,1))*s_mask+self.R_
         # print([memory[j][2] for j in range(length)])
 
@@ -126,10 +152,10 @@ class Parameter_server:
     def build_model(self):
         with tf.variable_scope("server_model"):
             self.input=tf.placeholder(dtype=tf.float32,shape=[None,STATE_NUM])
-            hidden1=tf.layers.dense(self.input,HIDDEN_LAYERE,activation=tf.nn.leaky_relu,name="server_layer_1")
-            self.prov=tf.layers.dense(hidden1,ACTION_NUM,activation=tf.nn.softmax,name="server_prob")
-            self.v=tf.layers.dense(hidden1,1,name="server_v")
-
+            hidden1=tf.layers.dense(self.input,HIDDEN_LAYERE1,activation=tf.nn.leaky_relu)
+            self.mu=tf.layers.dense(hidden1,ACTION_NUM)
+            self.theta=tf.layers.dense(hidden1,1)
+            self.v=tf.layers.dense(hidden1,1)
 class agent:
     def __init__(self,name,parameter_server):
         self.brain=brain(name,parameter_server)
@@ -137,15 +163,25 @@ class agent:
 
     #get action without random
     def action(self,state):
-        prob,v = self.brain.predict(state)
-        return np.random.choice(ACTION_LIST,p=prob)
+        mu,sig,v = self.brain.predict(state)
+        count=0
+        while True:
+            action=np.random.multivariate_normal(mu,sig*np.eye(ACTION_NUM))
+            if sum(action>=-1)==ACTION_NUM and sum(action<=1)==ACTION_NUM:
+                break
+            count+=1
+            if  count>=10:
+                action=random(-1,1,size=ACTION_NUM)
+                break
+        return action
 
     #get action with random
     def greedy_action(self,state):
         if np.random.random() <= GREEDY_EPS:
-            return np.random.choice(ACTION_LIST)
+            return random(-1,1,size=ACTION_NUM)
         else:
-            return self.action(state)
+            action=self.action(state)
+            return action
 
     def pull_parameter_server(self):
         self.brain.pull_parameter()
@@ -209,7 +245,7 @@ class Worker:
 
         # if self.total_trial%100==0:
         #     print(SESS.run(self.agent.brain.weight_param))
-
+        distance=0
         while True:
             step+=1
             frame+=1
@@ -219,37 +255,35 @@ class Worker:
                 self.env.render()
                 action=self.agent.action(observation)
                 sleep(0.02)
-            
-            next_observation,_,done,_=self.env.step(action)
+            next_observation,next_distance,done,_=self.env.step(action)
 
-            reward=0
-            if done:
-                if step>=199:
-                    reward=1
-                else:
-                    reward=-1
-            else:
-                #when not falling
-                reward+=0
+            reward=next_distance-distance
             
             self.memory.append([observation,action,reward,done,next_observation])
 
             observation=next_observation
+            distance=next_distance
 
-            if done:
+            if step%100==0:
+                self.agent.push_advantage_reward(self.memory)
+                self.agent.train()
+                self.memory=[]
+            if step==1000:
                 break
 
         self.leaning_memory=np.hstack((self.leaning_memory[1:],step))
         print("Thread:",self.name," Thread_trials:",self.total_trial," score:",step," mean_score:",self.leaning_memory.mean()," total_step:",frame)
-        if self.leaning_memory.mean()>=199:
+        
+        #when finish learning
+        if self.total_trial>=100:
             isLearned=True
             sleep(3)
-            self.agent.finish_leaning()
-            pass
+            # self.agent.finish_leaning()
         else:
-            self.agent.push_advantage_reward(self.memory)
-            self.agent.train()
-            self.memory=[]
+            # self.agent.push_advantage_reward(self.memory)
+            # self.agent.train()
+            # self.memory=[]
+            pass
 
 
 def main(args):
@@ -281,33 +315,7 @@ def main(args):
     if args.save:
         saver.save(SESS,args.model_path)
 
-if __name__=="__main__":
-    parser=argparse.ArgumentParser(description="Reiforcement training with A3C",add_help=True)
-    parser.add_argument("--model_path",type=str,required=True,help="model path. required")
-    parser.add_argument("--env_name",default="CartPole-v0",help="environment name. default is CartPole-v0")
-    parser.add_argument("--save",action="store_true",default=False,help="save command")
-    parser.add_argument("--load",action="store_true",default=False,help="load command")
-    args=parser.parse_args()
-
-    #define constatns
-
-    WORKER_NUM=5
-    ADVANTAGE=2
-    ENV_NAME=args.env_name
-    STATE_NUM=4
-    ACTION_LIST=[0,1]
-    ACTION_NUM=2
-    GREEDY_EPS=0.05
-    GAMMA=0.99
-    LEARNING_RATE=0.001
-    RMS_DECAY=0.99
-    LOSS_V=0.5
-    LOSS_ENTROPY=0.02
-    HIDDEN_LAYERE=20
-    OUTPUT_FILEPATH=args.model_path
-
-
-    
+if __name__=="__main__":   
     SESS=tf.Session()
 
     frame=0
@@ -316,3 +324,5 @@ if __name__=="__main__":
     main(args)
 
 print("end")
+
+
