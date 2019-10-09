@@ -43,6 +43,7 @@ parser.add_argument("--model_path",type=str,required=True,help="model path. requ
 parser.add_argument("--env_name",default="RoboschoolAnt-v1",help="environment name. default is CartPole-v0")
 parser.add_argument("--save",action="store_true",default=False,help="save command")
 parser.add_argument("--load",action="store_true",default=False,help="load command")
+parser.add_argument("--show",action="store_true",default=False,help="when render environment")
 args=parser.parse_args()
 
 #define constatns
@@ -232,7 +233,6 @@ class Worker:
         self.leaning_memory=np.zeros(10)
         self.memory=[]
         self.total_trial=0
-        self.test_count=1
 
     def run_thread(self):
         while True:
@@ -248,57 +248,63 @@ class Worker:
                 break
 
     def env_run(self):
+        global isLearned
+        global total_trial
         self.total_trial+=1
         step=0
         observation=self.env.reset()
-        global isLearned
-        global frame
         self.agent.pull_parameter_server()
 
         # if self.total_trial%100==0:
         #     print(SESS.run(self.agent.brain.weight_param))
-        distance=0
         while True:
             step+=1
-            frame+=1
             if self.thread_type=="train":
                 action=self.agent.greedy_action(observation)
             elif self.thread_type=="test":
                 self.env.render()
                 action=self.agent.action(observation)
                 sleep(0.02)
-            next_observation,next_distance,done,_=self.env.step(action)
+            next_observation,reward,done,_=self.env.step(action)
 
-            reward=next_distance-distance
+            reward/=5
             
             self.memory.append([observation,action,reward,done,next_observation])
 
             observation=next_observation
-            distance=next_distance
 
             if step%100==0:
                 self.agent.push_advantage_reward(self.memory)
                 self.loss_memory=np.hstack((self.loss_memory[1:],self.agent.train()))
                 self.memory=[]
-                print("Thread:",self.name," Thread_trials:",self.total_trial," score:",step,"-",distance," loss:",self.loss_memory.mean()," total_step:",frame)
+                print("Thread:",self.name," Thread_trials:",self.total_trial," score:",step,"-",reward," loss:",self.loss_memory.mean()," total_trial:",total_trial)
             if step==1000:
                 break
             
         self.leaning_memory=np.hstack((self.leaning_memory[1:],step)) 
         #when finish learning
-        if self.total_trial>=100:
-            isLearned=True
-            sleep(3)
+        if self.total_trial%1==0:
+            # isLearned=True
+            # sleep(3)
+            saver.save(SESS,args.model_path)
+            total_trial+=1
+            print("saved")
+            with open(args.model_path,"w") as f:
+                f.write(str(total_trial))
             # self.agent.finish_leaning()
         else:
             # self.agent.push_advantage_reward(self.memory)
             # self.agent.train()
-            # self.memory=[]
+            # self.memory=[]å
             pass
 
 
 def main(args):
     #make thread
+    global saver
+    global isLearned
+    global total_trial
+
     with tf.device("/cpu:0"):
         parameter_server=Parameter_server()
         thread=[]
@@ -310,27 +316,35 @@ def main(args):
     SESS.run(tf.global_variables_initializer())
     saver=tf.train.Saver()
     if args.load:
+        with open(args.model_path,"r") as f:
+            total_trial=int(f.read())
         ckpt = tf.train.get_checkpoint_state('./trained_model')
         if ckpt:
             saver.restore(SESS,args.model_path)
 
     runnning_thread=[]
-    for worker in thread:
-        job=lambda: worker.run_thread()
-        t=threading.Thread(target=job)
-        t.start()
-        runnning_thread.append(t)
-    COORD.join(runnning_thread)
+    if not args.show:
+        for worker in thread:
+            job=lambda: worker.run_thread()
+            t=threading.Thread(target=job)
+            t.start()
+            runnning_thread.append(t)
+        COORD.join(runnning_thread)
+    else:
+        isLearned=True
     test=Worker(thread_type="test",thread_name="test_thread",parameter_server=parameter_server)
     test.run_thread()
     if args.save:
         saver.save(SESS,args.model_path)
+        with open(model_path,"w") as f:
+            f.write(total_trial)
 
 if __name__=="__main__":   
     SESS=tf.Session()
 
-    frame=0
+    total_trial=0
     isLearned=False
+    saver=None
     main(args)
 
 print("end")
