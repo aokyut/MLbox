@@ -6,6 +6,7 @@ import numpy as np
 import threading
 from time import sleep
 from gym import wrappers
+from math import pi
 # 基本的な環境の使用方法
 # env = gym.make('RoboschoolAnt-v1')
 # env.reset()
@@ -53,16 +54,16 @@ sample_env=gym.make(args.env_name)
 #video
 video_path="./video"
 
-WORKER_NUM=8
-ADVANTAGE=10
+WORKER_NUM=1
+ADVANTAGE=5
 ENV_NAME=args.env_name
 STATE_NUM=28
 ACTION_NUM=len(sample_env.action_space.high)
 ACTION_SPACE=[(x,y) for x,y in zip(sample_env.action_space.low,sample_env.action_space.high)]
 #[(-1,1),(-1,1),(-1,1),(-1,1)]
-GREEDY_EPS=0.1
+GREEDY_EPS=0.4
 GAMMA=0.99
-LEARNING_RATE=0.001
+LEARNING_RATE=0.005
 RMS_DECAY=0.99
 LOSS_V=0.5
 LOSS_ENTROPY=0.02
@@ -83,8 +84,8 @@ class brain:
         with tf.variable_scope(self.name):
             self.input=tf.placeholder(dtype=tf.float32,shape=[None,STATE_NUM])
             hidden1=tf.layers.dense(self.input,HIDDEN_LAYERE1,activation=tf.nn.leaky_relu)
-            self.mu=tf.layers.dense(hidden1,ACTION_NUM)
-            self.theta=tf.layers.dense(hidden1,1)
+            self.mu=tf.layers.dense(hidden1,ACTION_NUM,activation=tf.nn.tanh)
+            self.sig=tf.layers.dense(hidden1,1,activation=tf.nn.softplus)
             self.v=tf.layers.dense(hidden1,1)
 
         self.reward=tf.placeholder(dtype=tf.float32,shape=(None,1))
@@ -92,14 +93,17 @@ class brain:
 
 
         advantage=self.reward-self.v
-        self.sig=1/(1+tf.exp(-self.theta))
-        self.prob=tf.exp(-tf.square(self.action-self.mu)/(2*tf.square(self.sig)))/self.sig
-        self.log_prob=tf.log(self.prob+1e-10)
+
+        self.sig=self.sig+1e-4
+
+        self.normal_dist=tf.distributions.Normal(self.mu,self.sig)
+        
+        self.log_prob=self.normal_dist.log_prob(self.action)
         self.policy_loss=-tf.reduce_sum(tf.stop_gradient(advantage)*self.log_prob,axis=1,keepdims=True)
 
         self.value_loss=tf.square(advantage)
 
-        self.entropy=tf.reduce_sum(-self.prob*tf.log(self.prob+1e-10),axis=1,keepdims=True)
+        self.entropy=self.normal_dist.entropy()
 
         self.loss=tf.reduce_mean(self.policy_loss+LOSS_V*self.value_loss+LOSS_ENTROPY*self.entropy)
 
@@ -125,6 +129,7 @@ class brain:
         feed_dict={self.input:self.s_, self.action:self.a_, self.reward:self.R}
         # print("::::::::",feed_dict,"::::::::")
         SESS.run(self.update_parameter_server,feed_dict)
+        # print(SESS.run([self.prob,self.sig],feed_dict))
         return SESS.run(self.loss,feed_dict)
 
     def pull_parameter(self):
@@ -172,7 +177,7 @@ class agent:
         mu,sig,v = self.brain.predict(state)
         count=0
         while True:
-            try:
+            try:                 
                 action=np.random.multivariate_normal(mu,sig*np.eye(ACTION_NUM))
             except:
                 print(mu,sig)
@@ -277,7 +282,7 @@ class Worker:
                 self.agent.push_advantage_reward(self.memory)
                 self.loss_memory=np.hstack((self.loss_memory[1:],self.agent.train()))
                 self.memory=[]
-                print("Thread:",self.name," Thread_trials:",self.total_trial," score:",step,"-",reward," loss:",self.loss_memory.mean()," total_trial:",total_trial)
+                print("Thread:",self.name," Thread_trials:",self.total_trial," score:",step,"|",reward," loss:",self.loss_memory.mean()," total_trial:",total_trial)
             if step==1000:
                 break
             
@@ -287,8 +292,8 @@ class Worker:
             # isLearned=True
             # sleep(3)
             saver.save(SESS,args.model_path)
-            total_trial+=1
             print("saved")
+            total_trial+=1
             with open(args.model_path,"w") as f:
                 f.write(str(total_trial))
             # self.agent.finish_leaning()
