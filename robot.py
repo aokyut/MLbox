@@ -54,16 +54,16 @@ sample_env=gym.make(args.env_name)
 #video
 video_path="./video"
 
-WORKER_NUM=1
+WORKER_NUM=8
 ADVANTAGE=5
 ENV_NAME=args.env_name
 STATE_NUM=28
 ACTION_NUM=len(sample_env.action_space.high)
 ACTION_SPACE=[(x,y) for x,y in zip(sample_env.action_space.low,sample_env.action_space.high)]
 #[(-1,1),(-1,1),(-1,1),(-1,1)]
-GREEDY_EPS=0.4
+GREEDY_EPS=0.3
 GAMMA=0.99
-LEARNING_RATE=0.005
+LEARNING_RATE=0.001
 RMS_DECAY=0.99
 LOSS_V=0.5
 LOSS_ENTROPY=0.02
@@ -262,6 +262,8 @@ class Worker:
 
         # if self.total_trial%100==0:
         #     print(SESS.run(self.agent.brain.weight_param))
+        total_reward=0
+        total=0
         while True:
             step+=1
             if self.thread_type=="train":
@@ -272,9 +274,10 @@ class Worker:
                 sleep(0.02)
             next_observation,reward,done,_=self.env.step(action)
 
-            reward/=5
-            
-            self.memory.append([observation,action,reward,done,next_observation])
+            vx=np.clip(next_observation[3]*10,-1,1)
+            total_reward+=vx
+            total+=vx
+            self.memory.append([observation,action,vx,done,next_observation])
 
             observation=next_observation
 
@@ -282,8 +285,10 @@ class Worker:
                 self.agent.push_advantage_reward(self.memory)
                 self.loss_memory=np.hstack((self.loss_memory[1:],self.agent.train()))
                 self.memory=[]
-                print("Thread:",self.name," Thread_trials:",self.total_trial," score:",step,"|",reward," loss:",self.loss_memory.mean()," total_trial:",total_trial)
+                print("Thread:",self.name," Thread_trials:",self.total_trial," score:",total,"|",total_reward," loss:",self.loss_memory.mean()," total_trial:",total_trial)
+                total_reward=0           
             if step==1000:
+                total=0
                 break
             
         self.leaning_memory=np.hstack((self.leaning_memory[1:],step)) 
