@@ -1,3 +1,31 @@
+"""
+今回の実装
+ppoを用いて連続な行動空間において強化学習を行うモデル
+変更部分
+ネットワーク部分の変更（連続行動空間に適応する）
+ppo_brain
+/build_model:　連続行動空間用に確率分布を用いて推論を行うように変更
+ppo_agent
+/action:　ppo_brainから推論された確率分布から行動を出力
+/greedy_action:　一定確率で一様分布から行動を出力
+
+入出力部分の変更
+入力２８次元、出力８次元となるようにする
+出力については
+分布の平均（8次元）、分散（1次元）、状態価値（1次元）
+行動は（−１、＋１）
+
+今回用いるの環境用の変更("RoboschoolAnt-v1")
+Worker 
+/env_run: 報酬の与え方が変わるのでその設定を行う
+1000ステップで環境をリセット
+100ステップごとに学習を行う
+
+学習全体の変更
+定期的にsaveを行うようにする
+--show引数を与えるようにする
+logとしてlossを出力
+"""
 import argparse
 import tensorflow as tf
 import numpy as np
@@ -10,9 +38,10 @@ from os import path
 
 parser=argparse.ArgumentParser(description="Reiforcement training with PPO",add_help=True)
 parser.add_argument("--model",type=str,required=True,help="model base name. required")
-parser.add_argument("--env_name",default="CartPole-v0",help="environment name. default is CartPole-v0")
+parser.add_argument("--env_name",default="RoboschoolAnt-v1",help="environment name. default is RoboschoolAnt-v1")
 parser.add_argument("--save",action="store_true",default=False,help="save command")
 parser.add_argument("--load",action="store_true",default=False,help="load command")
+parser.add_argument("--show",action="store_true",default=False,help="render environment")
 parser.add_argument("--thread_num",type=int,default=5)
 parser.add_argument("--video",action="store_true",default=False, help="write this if you want to save as video")
 args=parser.parse_args()
@@ -26,9 +55,9 @@ MODEL_DIR="./train_info/models"
 MODEL_SAVE_PATH=path.join(MODEL_DIR,args.model)
 
 ADVANTAGE=1
-STATE_NUM=4
+STATE_NUM=28
 ACTION_LIST=[0,1]
-ACTION_NUM=2
+ACTION_NUM=8
 #epsiron parameter
 EPS_START = 0.5
 EPS_END = 0.2
@@ -44,6 +73,7 @@ HIDDEN_LAYERE=30
 EPSIRON = 0.2
 
 
+#define some of functions
 def huber_loss(advantage, delta=0.5):
     error = advantage
     cond = tf.abs(error) < delta
@@ -51,6 +81,9 @@ def huber_loss(advantage, delta=0.5):
     squared_loss = 0.5 * tf.square(error)
     linear_loss = delta * (tf.abs(error) - 0.5 * delta)
     return tf.where(cond, squared_loss, linear_loss)
+
+def random(min,max,size):
+    return np.random.uniform(size=size)*(max-min)+min
 
 
 class ppo_brain:
@@ -60,15 +93,19 @@ class ppo_brain:
         self.prob_old=1.0
 
     def build_model(self):
-        self.input=tf.placeholder(dtype=tf.float32,shape=[None,STATE_NUM])
+        self.input = tf.placeholder(dtype=tf.float32,shape=[None,STATE_NUM])
+
+        #define two network
         with tf.variable_scope("current_brain"):
-            hidden1=tf.layers.dense(self.input,HIDDEN_LAYERE,activation=tf.nn.leaky_relu)
-            self.prob=tf.layers.dense(hidden1,ACTION_NUM,activation=tf.nn.softmax)
+            hidden1 = tf.layers.dense(self.input,HIDDEN_LAYERE,activation = tf.nn.leaky_relu)
+            self.mu = tf.layers.dense(hidden1,ACTION_NUM,activation = tf.nn.tanh)
+            self.sig = tf.layers.dense(hidden1, 1, activation = tf.nn.softplus)
             self.v=tf.layers.dense(hidden1,1)
         with tf.variable_scope("old_brain"):
-            old_hiddend1=tf.layers.dense(self.input,HIDDEN_LAYERE,activation=tf.nn.leaky_relu)
-            self.old_prob=tf.layers.dense(old_hidden1,ACTION_NUM,activation=tf.nn.softmax)
-            self.old_v=tf.layers.dense(old_hidden1,1)
+            old_hiddend1 = tf.layers.dense(self.input,HIDDEN_LAYERE,activation=tf.nn.leaky_relu)
+            self.old_mu = tf.layers.dense(old_hidden1,ACTION_NUM,activation=tf.nn.softmax)
+            self.old_sig = tf.layers.dense(old_hidden1, 1, activation = tf.nn.softplus)
+            self.old_v=tf.layers.dense(old_hidden1, 1)
 
         self.reward=tf.placeholder(dtype=tf.float32,shape=(None,1))
         self.action=tf.placeholder(dtype=tf.float32,shape=(None,ACTION_NUM))
@@ -76,8 +113,13 @@ class ppo_brain:
         #define loss function
         advantage = self.reward-self.v
 
+        #distributions
+        action_dist_new = tf.distributions.Normal(self.mu, self.sig)
+        action_dist_old = tf.distributions.Normal(self.old_mu, self.old_sig)
+
         #define policy loss
-        r_theta = tf.div(self.prob + 1e-10, tf.stop_gradient(self.old_prob) + 1e-10)
+        r_theta = tf.div(action_dist_new.prob(self.action) + 1e-10, \
+            tf.stop_gradient(action_dist_old.prob(self.action)) + 1e-10)
         action_theta = tf.reduce_sum(tf.multiply(r_theta, self.action), axis=1, keepdims=True)
         r_clip = tf.clip_by_value(action_theta,1-EPSIRON,1+EPSIRON)
         advantage_cpi = tf.multiply(action_theta , tf.stop_gradient(advantage))
@@ -129,7 +171,8 @@ class ppo_brain:
         #update params
         feed_dict={self.input:s_, self.action:a_, self.reward:R}
         SESS.run(self.insert)
-        SESS.run(self.minimize,feed_dict)
+        _, loss = SESS.run([self.minimize,self.loss],feed_dict)
+        return loss
 
 
 
@@ -141,8 +184,15 @@ class ppo_agent:
 
     #get action without random
     def action(self,state):
-        prob,v = self.brain.predict(state)
-        return np.random.choice(ACTION_LIST,p=prob)
+        mu,sig,v = self.brain.predict(state)
+        count=0
+        while True:
+            action=np.random.multivariate_normal(mu,sig*np.eye(ACTION_NUM))
+            if sum(action>=-1)==ACTION_NUM and sum(action<=1)==ACTION_NUM:
+                return action
+            count+=1
+            if  count>=10:
+                return random(-1,1,size=ACTION_NUM)
 
 
     #get action with random
@@ -153,7 +203,7 @@ class ppo_agent:
             eps = EPS_START + frame* (EPS_END - EPS_START) / EPS_STEPS  
 
         if np.random.random() <= eps:
-            return np.random.choice(ACTION_LIST)
+            return random(-1,1,size=ACTION_NUM)
         else:
             return self.action(state)
 
@@ -170,10 +220,11 @@ class ppo_agent:
         for i in range(ADVANTAGE-1):
             R=((R-memory[len(memory)-ADVANTAGE+i][2])/GAMMA)
             self.memory.append([memory[i][0],memory[i][1],R,True,memory[i][4],GAMMA**(ADVANTAGE-i)])
-        self.brain.update(self.memory)
+        loss = self.brain.update(self.memory)
         # log=[memory[j][2] for j in range(len(memory))]
         # print(log)
         self.memory=[]
+        return loss
 
 
 
@@ -188,7 +239,6 @@ class Worker:
         self.leaning_memory=np.zeros(10)
         self.memory=[]
         self.total_trial=0
-        self.test_count=1
 
 
     def run_thread(self):
@@ -208,6 +258,8 @@ class Worker:
     def env_run(self):
         global isLearned
         global frame
+        global total_trial
+        total_trial += 1
         self.total_trial+=1
 
         step=0
@@ -225,36 +277,26 @@ class Worker:
                 sleep(0.01)
                 action=self.agent.action(observation)
             
-            next_observation,_,done,_=self.env.step(action)
-
-            reward=0
-            if done:
-                if step>=199:
-                    reward=1
-                else:
-                    reward=-1
-            else:
-                #when not falling
-                reward+=0
+            next_observation,reward,done,_=self.env.step(action)
             
             self.memory.append([observation,action,reward,done,next_observation])
 
             observation=next_observation
 
-            if done:
+            if step % 1000 == 0:
                 break
 
-        self.leaning_memory=np.hstack((self.leaning_memory[1:],step))
-        print("Thread:",self.name," Thread_trials:",self.total_trial," score:",step," mean_score:",self.leaning_memory.mean()," total_step:",frame)
-        if self.leaning_memory.mean()>=199:
-            isLearned=True
-            sleep(3)
-            pass
-        else:
-            self.agent.update(self.memory)
-            self.memory=[]
-        
+            if step % 100 == 0:
+                self.agent.update(self.memory)
+                self.memory = self.memory[-ADVANTAGE:]
 
+        self.leaning_memory=np.hstack((self.leaning_memory[1:],step))
+
+        loss = self.agent.update(self.memory)
+        self.memory = []
+        print("Thread:",self.name," Thread_trials:",self.total_trial,"reward:",reward,"loss:"," total_step:",frame)
+
+    
 
 def main(args):
     #make thread
@@ -268,6 +310,10 @@ def main(args):
     COORD=tf.train.Coordinator()
     SESS.run(tf.global_variables_initializer())
     saver=tf.train.Saver()
+
+    if args.show:
+        global isLearned
+        isLearned = True
     
     if args.load:
         ckpt = tf.train.get_checkpoint_state(MODEL_DIR)
@@ -294,6 +340,7 @@ if __name__=="__main__":
 
     frame=0
     isLearned=False
+    total_trial=0
     
     main(args)
 

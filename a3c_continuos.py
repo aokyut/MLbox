@@ -41,7 +41,7 @@ Workerの報酬評価部分
 """
 parser=ArgumentParser(description="Reiforcement training with A3C",add_help=True)
 parser.add_argument("--model_path",type=str,required=True,help="model path. required")
-parser.add_argument("--env_name",default="RoboschoolAnt-v1",help="environment name. default is CartPole-v0")
+parser.add_argument("--env_name",default="RoboschoolAnt-v1",help="environment name. default is RoboschoolAnt-v1")
 parser.add_argument("--save",action="store_true",default=False,help="save command")
 parser.add_argument("--load",action="store_true",default=False,help="load command")
 parser.add_argument("--show",action="store_true",default=False,help="when render environment")
@@ -90,7 +90,6 @@ class brain:
 
         self.reward=tf.placeholder(dtype=tf.float32,shape=(None,1))
         self.action=tf.placeholder(dtype=tf.float32,shape=(None,ACTION_NUM))
-
 
         advantage=self.reward-self.v
 
