@@ -66,7 +66,7 @@ class ppo_brain:
             self.prob=tf.layers.dense(hidden1,ACTION_NUM,activation=tf.nn.softmax)
             self.v=tf.layers.dense(hidden1,1)
         with tf.variable_scope("old_brain"):
-            old_hiddend1=tf.layers.dense(self.input,HIDDEN_LAYERE,activation=tf.nn.leaky_relu)
+            old_hidden1=tf.layers.dense(self.input,HIDDEN_LAYERE,activation=tf.nn.leaky_relu)
             self.old_prob=tf.layers.dense(old_hidden1,ACTION_NUM,activation=tf.nn.softmax)
             self.old_v=tf.layers.dense(old_hidden1,1)
 

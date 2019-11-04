@@ -32,13 +32,14 @@ import numpy as np
 import random
 import threading
 import gym
+import pybullet_envs
 from time import sleep
 from gym import wrappers
 from os import path
 
 parser=argparse.ArgumentParser(description="Reiforcement training with PPO",add_help=True)
 parser.add_argument("--model",type=str,required=True,help="model base name. required")
-parser.add_argument("--env_name",default="RoboschoolAnt-v1",help="environment name. default is RoboschoolAnt-v1")
+parser.add_argument("--env_name",default="AntBulletEnv-v0",help="environment name. default is AntBulletEnv-v0")
 parser.add_argument("--save",action="store_true",default=False,help="save command")
 parser.add_argument("--load",action="store_true",default=False,help="load command")
 parser.add_argument("--show",action="store_true",default=False,help="render environment")
@@ -54,21 +55,24 @@ VIDEO_DIR="./train_info/video"
 MODEL_DIR="./train_info/models"
 MODEL_SAVE_PATH=path.join(MODEL_DIR,args.model)
 
-ADVANTAGE=1
+ADVANTAGE=4
 STATE_NUM=28
 ACTION_LIST=[0,1]
 ACTION_NUM=8
 #epsiron parameter
-EPS_START = 0.5
-EPS_END = 0.2
+EPS_START = 0.8
+EPS_END = 0.4
 EPS_STEPS = 200 * WORKER_NUM**2
 #learning parameter
 GAMMA=0.99
 LEARNING_RATE=0.002
+DROPOUT_RATE=0.5
 #loss constants
 LOSS_V=0.5
 LOSS_ENTROPY=0.02
-HIDDEN_LAYERE=30
+HIDDEN_LAYERE=64
+LAYERE2=32
+LAYERE3=16
 
 EPSIRON = 0.2
 
@@ -98,14 +102,24 @@ class ppo_brain:
         #define two network
         with tf.variable_scope("current_brain"):
             hidden1 = tf.layers.dense(self.input,HIDDEN_LAYERE,activation = tf.nn.leaky_relu)
-            self.mu = tf.layers.dense(hidden1,ACTION_NUM,activation = tf.nn.tanh)
-            self.sig = tf.layers.dense(hidden1, 1, activation = tf.nn.softplus)
-            self.v=tf.layers.dense(hidden1,1)
+            hidden1_drop = tf.nn.dropout(hidden1, DROPOUT_RATE)
+            hidden2 = tf.layers.dense(hidden1_drop,LAYERE2,activation = tf.nn.leaky_relu)
+            hidden2_drop = tf.nn.dropout(hidden2, DROPOUT_RATE)
+            hidden3 = tf.layers.dense(hidden2_drop,LAYERE3,activation = tf.nn.leaky_relu)
+            hidden3_drop = tf.nn.dropout(hidden3, DROPOUT_RATE)
+            self.mu = tf.layers.dense(hidden3_drop,ACTION_NUM,activation = tf.nn.tanh)
+            self.sig = tf.layers.dense(hidden3_drop, 1, activation = tf.nn.softplus)
+            self.v=tf.layers.dense(hidden3_drop,1)
         with tf.variable_scope("old_brain"):
-            old_hiddend1 = tf.layers.dense(self.input,HIDDEN_LAYERE,activation=tf.nn.leaky_relu)
-            self.old_mu = tf.layers.dense(old_hidden1,ACTION_NUM,activation=tf.nn.softmax)
-            self.old_sig = tf.layers.dense(old_hidden1, 1, activation = tf.nn.softplus)
-            self.old_v=tf.layers.dense(old_hidden1, 1)
+            old_hidden1 = tf.layers.dense(self.input,HIDDEN_LAYERE,activation = tf.nn.leaky_relu)
+            old_hidden1_drop = tf.nn.dropout(old_hidden1, DROPOUT_RATE)
+            old_hidden2 = tf.layers.dense(old_hidden1_drop,LAYERE2,activation = tf.nn.leaky_relu)
+            old_hidden2_drop = tf.nn.dropout(old_hidden2, DROPOUT_RATE)
+            old_hidden3 = tf.layers.dense(old_hidden2_drop,LAYERE3,activation = tf.nn.leaky_relu)
+            old_hidden3_drop = tf.nn.dropout(old_hidden3, DROPOUT_RATE)
+            self.old_mu = tf.layers.dense(old_hidden3_drop,ACTION_NUM,activation = tf.nn.tanh)
+            self.old_sig = tf.layers.dense(old_hidden3_drop, 1, activation = tf.nn.softplus)
+            self.old_v=tf.layers.dense(old_hidden3_drop,1)
 
         self.reward=tf.placeholder(dtype=tf.float32,shape=(None,1))
         self.action=tf.placeholder(dtype=tf.float32,shape=(None,ACTION_NUM))
@@ -118,8 +132,9 @@ class ppo_brain:
         action_dist_old = tf.distributions.Normal(self.old_mu, self.old_sig)
 
         #define policy loss
-        r_theta = tf.div(action_dist_new.prob(self.action) + 1e-10, \
-            tf.stop_gradient(action_dist_old.prob(self.action)) + 1e-10)
+        self.prob_new = action_dist_new.prob(self.action) + 1e-10
+        self.prob_old = action_dist_old.prob(self.action) + 1e-10
+        r_theta = tf.div(self.prob_new, tf.stop_gradient(self.prob_old))
         action_theta = tf.reduce_sum(tf.multiply(r_theta, self.action), axis=1, keepdims=True)
         r_clip = tf.clip_by_value(action_theta,1-EPSIRON,1+EPSIRON)
         advantage_cpi = tf.multiply(action_theta , tf.stop_gradient(advantage))
@@ -130,10 +145,10 @@ class ppo_brain:
         self.value_loss=tf.square(advantage)
 
         #define entropy
-        self.entropy=tf.reduce_sum(self.prob*tf.log(self.prob+1e-10),axis=1,keepdims=True)
+        self.entropy = action_dist_new.entropy()
 
         #output loss function
-        self.loss=tf.reduce_sum(-self.policy_loss+LOSS_V*self.value_loss-LOSS_ENTROPY*self.entropy)
+        self.loss=tf.reduce_mean(-self.policy_loss+LOSS_V*self.value_loss-LOSS_ENTROPY*self.entropy)
 
         #update parameters
         self.opt = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE)
@@ -150,8 +165,8 @@ class ppo_brain:
     def predict(self,state):
         state=np.array(state).reshape(-1,STATE_NUM)
         feed_dict={self.input:state}
-        p,v=SESS.run([self.prob,self.v],feed_dict)
-        return p.reshape(-1),v.reshape(-1)
+        mu,sig,v=SESS.run([self.mu,self.sig,self.v],feed_dict)
+        return mu.reshape(-1,ACTION_NUM),mu.reshape(-1),v.reshape(-1)
 
 
     #preprocessing memory data [observation, action, R,done,next_observation],state_mask
@@ -159,15 +174,15 @@ class ppo_brain:
     def update(self,memory):
         length=len(memory)
        
-        s_=np.array([memory[j][0] for j in range(length)]).reshape(-1,STATE_NUM)
-        a_=np.eye(ACTION_NUM)[[memory[j][1] for j in range(length)]].reshape(-1,ACTION_NUM)
-        R_=np.array([memory[j][2] for j in range(length)]).reshape(-1,1)
+        s_ = np.array([memory[j][0] for j in range(length)]).reshape(-1,STATE_NUM)
+        a_ = np.vstack([[memory[j][1] for j in range(length)]])
+        R_ = np.array([memory[j][2] for j in range(length)]).reshape(-1,1)
        
-        d_=np.array([memory[j][3] for j in range(length)]).reshape(-1,1)
-        s_mask=np.array([memory[j][5] for j in range(length)]).reshape(-1,1)
-        _s=np.array([memory[j][4] for j in range(length)]).reshape(-1,STATE_NUM)
-        _, v=self.predict(_s)
-        R=(np.where(d_,0,1)*v.reshape(-1,1))*s_mask+R_
+        d_ = np.array([memory[j][3] for j in range(length)]).reshape(-1,1)
+        s_mask = np.array([memory[j][5] for j in range(length)]).reshape(-1,1)
+        _s = np.array([memory[j][4] for j in range(length)]).reshape(-1,STATE_NUM)
+        _, _, v = self.predict(_s)
+        R = (np.where(d_,0,1) * v.reshape(-1,1)) * s_mask+R_
         #update params
         feed_dict={self.input:s_, self.action:a_, self.reward:R}
         SESS.run(self.insert)
@@ -185,6 +200,7 @@ class ppo_agent:
     #get action without random
     def action(self,state):
         mu,sig,v = self.brain.predict(state)
+        mu = mu.reshape(-1)
         count=0
         while True:
             action=np.random.multivariate_normal(mu,sig*np.eye(ACTION_NUM))
@@ -259,10 +275,13 @@ class Worker:
         global isLearned
         global frame
         global total_trial
+        global saver
         total_trial += 1
         self.total_trial+=1
 
         step=0
+        if self.thread_type == "test":
+            self.env.render(mode = "human")
         observation=self.env.reset()
         # if self.total_trial%100==0:
         #     print(SESS.run(self.agent.brain.weight_param))
@@ -273,11 +292,11 @@ class Worker:
             if self.thread_type=="train":
                 action=self.agent.greedy_action(observation)
             elif self.thread_type=="test":
-                self.env.render()
-                sleep(0.01)
                 action=self.agent.action(observation)
             
             next_observation,reward,done,_=self.env.step(action)
+            if reward<0:
+                reward /= 3
             
             self.memory.append([observation,action,reward,done,next_observation])
 
@@ -287,18 +306,33 @@ class Worker:
                 break
 
             if step % 100 == 0:
-                self.agent.update(self.memory)
+                loss = self.agent.update(self.memory)
                 self.memory = self.memory[-ADVANTAGE:]
+                trial_rate = step // 100
+                print("Thread:",self.name," Thread_trials:",self.total_trial,"progress",trial_rate,"/10","reward:","{:<010}".format(reward)[:7],"loss:","{:<010}".format(loss)[:7]," total_trial:",total_trial)
+            
+            if self.thread_type == "test":
+                self.env.render(mode = 0)
 
         self.leaning_memory=np.hstack((self.leaning_memory[1:],step))
 
+        if total_trial%WORKER_NUM==0 and args.save:
+            saver.save(SESS,MODEL_SAVE_PATH)
+            print("saved")
+            total_trial+=1
+            with open(MODEL_SAVE_PATH,"w") as f:
+                f.write(str(total_trial))
+        else:
+            pass
         loss = self.agent.update(self.memory)
         self.memory = []
-        print("Thread:",self.name," Thread_trials:",self.total_trial,"reward:",reward,"loss:"," total_step:",frame)
+        print("Thread:",self.name," Thread_trials:",self.total_trial,"progress","10/10","reward:","{:<010}".format(reward)[:7],"loss:","{:<010}".format(loss)[:7]," total_trial:",total_trial)
+ 
 
     
 
 def main(args):
+    global saver
     #make thread
     with tf.device("/cpu:0"):
         brain=ppo_brain()
@@ -314,8 +348,12 @@ def main(args):
     if args.show:
         global isLearned
         isLearned = True
-    
+        thread = []
+
     if args.load:
+        global total_trial
+        with open(MODEL_SAVE_PATH,"r") as f:
+            total_trial=int(f.read())
         ckpt = tf.train.get_checkpoint_state(MODEL_DIR)
         if ckpt:
             saver.restore(SESS,MODEL_SAVE_PATH)
@@ -329,18 +367,15 @@ def main(args):
     COORD.join(runnning_thread)
     test=Worker(thread_type="test",thread_name="test_thread",brain=brain)
     test.run_thread()
-    if args.save:
-        saver.save(SESS,MODEL_SAVE_PATH)
-        print("saved")
 
 if __name__=="__main__":
 
 
-    SESS=tf.Session()
-
-    frame=0
-    isLearned=False
-    total_trial=0
+    SESS = tf.Session()
+    saver = None
+    frame = 0
+    isLearned = False
+    total_trial = 0
     
     main(args)
 
