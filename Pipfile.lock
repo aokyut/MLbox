@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "95966de0b9a3e3d6ed242fdecb3c024fec6c67af2ca9caf65bb780a2ec3c1018"
+            "sha256": "1209c7cc3b82a0ccfb68edcca73796c83c1c6028ce92824e5ddf535591dcf9a9"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -28,6 +28,26 @@
                 "sha256:e67f46adcec78dbc3c04462f3aba3213a673d5652eba2609ed1ef15492a44b8d"
             ],
             "version": "==1.5.0"
+        },
+        "box2d": {
+            "hashes": [
+                "sha256:d1557dffdf9c1d6c796ec5df53e3d93227bb026c14b8411d22c295edaa2fb225"
+            ],
+            "index": "pypi",
+            "version": "==2.3.2"
+        },
+        "box2d-py": {
+            "hashes": [
+                "sha256:4e4c23f454bcf26d2cedf2d46e5f0651ad4ed518f0d21e14f228cab001ddbcae",
+                "sha256:50cef0925b12d01013dcbe0055ae765b765711b21a324a3eb400ff705a5cc9f6",
+                "sha256:6c99c75ac75bc9fa98b9914678bff47afddeea2320e7d9956f0859714a8ed579",
+                "sha256:9525d8b3259800d6ae02da4bb2a1d398baca36e128e62014b25c50dcfb3beed4",
+                "sha256:bdacfbbc56079bb317548efe49d3d5a86646885cc27f4a2ee97e4b2960921ab7",
+                "sha256:d4c37540b7b105c47fedb9c635bc0c57920ad6b36479f34f5fd0f73a7376b379",
+                "sha256:e1c1e6b038575ba25dfd95dd3725ceb8602d8376c1e8968a86383982a15cd634"
+            ],
+            "index": "pypi",
+            "version": "==2.3.8"
         },
         "cloudpickle": {
             "hashes": [

@@ -1,6 +1,8 @@
 -i https://pypi.org/simple
 absl-py==0.8.1
 bleach==1.5.0
+box2d-py==2.3.8
+box2d==2.3.2
 cloudpickle==1.2.2
 future==0.18.2
 gym==0.15.3
